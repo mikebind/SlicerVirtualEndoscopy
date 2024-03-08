@@ -218,12 +218,14 @@ def capture_cycles_images(
         timePointList += fullTimePointList
     # timePointList = list(range(mostOpenTimeIdx+1,numTimePoints))+list(range(numTimePoints))+list(range(numTimePoints))
     frameCount = frameStartingIdx
+    imgFileNames = []
     for idx in timePointList:
         browserNode.SetSelectedItemNumber(idx)
-        cap.captureImageFromView(
-            None, pathlib.Path.joinpath(outDir, (filePattern % frameCount))
-        )
+        imgFileName = pathlib.Path.joinpath(outDir, (filePattern % frameCount))
+        cap.captureImageFromView(None, imgFileName)
         frameCount += 1
+        imgFileNames.append(imgFileName)
+    return imgFileNames
 
 
 def save_video_from_image_dir(
