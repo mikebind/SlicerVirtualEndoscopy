@@ -27,9 +27,11 @@ from slicer import (
     vtkMRMLCameraNode,
     vtkMRMLSliceNode,
     vtkMRMLViewNode,
+    vtkMRMLSequenceBrowserNode,
 )
 
 import ScreenCapture
+from Resources.FromJupyter import jupyterNbFcns
 
 
 #
@@ -192,7 +194,9 @@ class VirtualEndoscopyParameterNode:
     cameraViewAngleDegrees: Annotated[float, WithinRange(1, 360)] = 110
     useCameraViewAngleBool: bool = True
     cameraClippingRangeMinimum: float = 0.08
-    cameraClippingRangeMaximum: float = 80  # the maximum shouldn't be more than (AT MOST!) about 10K * the minimum, and 1K-3K seems better for most cases
+    cameraClippingRangeMaximum: float = (
+        80  # the maximum shouldn't be more than (AT MOST!) about 10K * the minimum, and 1K-3K seems better for most cases
+    )
     useCameraClippingRangeBool: bool = True
     playbackTimerIntervalMilliseconds: int = 10
     videoFrameRateFPS: float = 5
@@ -201,9 +205,9 @@ class VirtualEndoscopyParameterNode:
     videoSaveFilePath: pathlib.Path = pathlib.Path.home().joinpath(
         "SlicerCapture", "VirtualEndoVideo.mp4"
     )
-    currentStepIndex: Annotated[
-        float, WithinRange(0, 200000)
-    ] = 0  # should be int, but needs to be float to connect to slider
+    currentStepIndex: Annotated[float, WithinRange(0, 200000)] = (
+        0  # should be int, but needs to be float to connect to slider
+    )
     currentlyPlaying: bool = False
     currentlyRecordingVideo: bool = False
     jumpSliceViewMode: JumpSliceModeEnum
@@ -622,7 +626,7 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         parameterNode: VirtualEndoscopyParameterNode,
         imageDirectory: Optional[pathlib.Path] = None,
         imageFilePattern: str = "tempImage_%05d.png",
-    ) -> (list[pathlib.Path], str):
+    ) -> tuple[list[pathlib.Path], str]:
         """Save image series using parameters from parameter node.
         Return list of saved image file names and the image file pattern used
         """
@@ -643,7 +647,7 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
             vidSaveDirectory = vidSaveFilePath.parent
             imageDirectory = pathlib.Path.joinpath(vidSaveDirectory, "TempImageDir")
         # Ensure image directory exists for saving
-        imageDirectory.mkdir(exist_ok=True)
+        imageDirectory.mkdir(parents=True, exist_ok=True)
 
         imageFilePaths = []
 
@@ -663,7 +667,7 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         locationsCurveNode: vtkMRMLMarkupsNode,
         focalPointsCurveNode: vtkMRMLMarkupsNode,
         stepToRetrieve: int,
-    ) -> (ArrayLike, ArrayLike):
+    ) -> tuple[ArrayLike, ArrayLike]:
         """Return the Nth control point world position from two curve nodes representing
         camera locations and camera focal points."""
         location = locationsCurveNode.GetNthControlPointPositionWorld(stepToRetrieve)
@@ -681,7 +685,7 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         cameraLocations: Optional[vtkMRMLMarkupsNode] = None,
         cameraFocalPoints: Optional[vtkMRMLMarkupsNode] = None,
         finalFocalPoint: Optional[list[float]] = None,
-    ) -> (vtkMRMLMarkupsNode, vtkMRMLMarkupsNode):
+    ) -> tuple[vtkMRMLMarkupsNode, vtkMRMLMarkupsNode]:
         """
         Given an input curve, this function typically resamples it to a uniformly spaced set of camera
         locations following the curve, as well as a set of camera focal points which are just the
@@ -935,6 +939,94 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
             )
         # Force application update
         slicer.app.processEvents()
+
+    def setupColorSceneLayoutAndLighting(
+        self,
+        sequenceBrowserNode,
+        segmentationProxyNode,
+        segmentName="SimpleAirwayAir",
+        segmentColor=None,
+    ):
+        if segmentColor:
+            jupyterNbFcns.set_sequence_segment_color(
+                sequenceBrowserNode,
+                segmentationProxyNode,
+                segmentName,
+                color=segmentColor,
+            )
+        else:
+            jupyterNbFcns.set_sequence_segment_color(
+                sequenceBrowserNode, segmentationProxyNode, segmentName
+            )
+        # Change layout to Dual3D view if it's not already
+        Dual3DLayoutID = 15
+        slicer.app.layoutManager().setLayout(Dual3DLayoutID)
+        # Set better lighting for endoscopy view
+        jupyterNbFcns.setup_lighting()
+
+    """ IDEA for TODO: Instead of doing a full flythrough of the VirtualEndoscopy
+    path, and THEN doing dynamic looping, some additional flexibility could be cool.
+    Allow specification of a list of frame numbers to stop at and run the 
+    dynamic loop(s). This could be helpful if there are possibly multiple
+    points of interest. Also, if we could specify the last flythrough index
+    we could skip the need to chop off the continuation of the centerline.
+    This shouldn't be too hard to implement. 
+    """
+
+    def createDynamicVirtualEndoVid(
+        self,
+        parameterNode: VirtualEndoscopyParameterNode,
+        sequenceBrowserNode: vtkMRMLSequenceBrowserNode,
+        mostOpenFrameNumber: int,
+        numFullDynamicLoops: int = 2,
+        ffmpegExtraOptions: str = "-codec libx264 -vf scale=-2:{videoHeight} -pix_fmt yuv420p",
+        deleteImages: bool = True,
+    ) -> None:
+        """This function is to generate a virtual endoscopy video
+        for a dynamic CT.  This capability is not yet built in to
+        the GUI part of the module because it does not know about
+        the sequence browser.
+        """
+        # Go to most open frame for fly-in
+        sequenceBrowserNode.SetSelectedItemNumber(mostOpenFrameNumber)
+        # Capture fly-in image series
+        imgFilePaths, imgPattern = self.saveImageSeriesByParameterNode(
+            parameterNode,
+            imageDirectory=None,
+        )
+        imgSaveDir = imgFilePaths[0].parent
+        # Add the dynamic cycling images
+        cycleImgFilePaths = jupyterNbFcns.capture_cycles_images(
+            sequenceBrowserNode,
+            imgSaveDir,
+            imgPattern,
+            numFullDynamicLoops=numFullDynamicLoops,
+            frameStartingIdx=len(imgFilePaths),
+        )
+        # Assemble into video file!
+        captureLogic = ScreenCapture.ScreenCaptureLogic()
+        frameRate = parameterNode.videoFrameRateFPS
+        videoHeight = parameterNode.videoHeightPixels
+
+        # Save a series
+        extraOptions = ffmpegExtraOptions.format(videoHeight=videoHeight)
+        # Use ScreenCapture module logic to capture a video from the series of images
+        videoFileName = parameterNode.videoSaveFilePath
+        captureLogic.createVideo(
+            frameRate, extraOptions, imgSaveDir, imgPattern, videoFileName
+        )
+        # Note that createVideo() automatically specifies -y, -r {frameRate}, -start_number 0
+        # If -pix_fmt yuv420p is omitted, many players will not work (incl windows media player)
+        # If the scaling is omitted, I get weird artifacts.  One theory is that this is due to bit rate limitations on huge
+        # images/videos.
+        # Clean up images as requested
+        if deleteImages:
+            for imgFile in imgFilePaths:
+                imgFile.unlink()
+            for imgFile in cycleImgFilePaths:
+                imgFile.unlink()
+            # Also remove the temporary directory
+            imgSaveDir.unlink()
 
     def process(
         self,
