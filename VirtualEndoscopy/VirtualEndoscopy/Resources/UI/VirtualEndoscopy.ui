@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>383</width>
-    <height>920</height>
+    <width>415</width>
+    <height>1103</height>
    </rect>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
@@ -115,6 +115,9 @@
          <stringlist notr="true"/>
         </property>
         <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="renameEnabled">
          <bool>true</bool>
         </property>
         <property name="interactionNodeSingletonTag">
@@ -248,6 +251,9 @@
       </item>
       <item row="4" column="1">
        <widget class="ctkPathLineEdit" name="PathLineEdit">
+        <property name="filters">
+         <set>ctkPathLineEdit::AllEntries|ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::Files|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::PermissionMask|ctkPathLineEdit::Readable|ctkPathLineEdit::Writable</set>
+        </property>
         <property name="SlicerParameterName" stdset="0">
          <string>videoSaveFilePath</string>
         </property>
@@ -264,11 +270,205 @@
     </widget>
    </item>
    <item>
+    <widget class="ctkCollapsibleButton" name="CollapsibleButton">
+     <property name="text">
+      <string>4D Captures</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout_2">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label">
+        <property name="text">
+         <string>Sequence Browser</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="qMRMLNodeComboBox" name="sequenceBrowserSelector">
+        <property name="nodeTypes">
+         <stringlist notr="true"/>
+        </property>
+        <property name="hideChildNodeTypes">
+         <stringlist notr="true"/>
+        </property>
+        <property name="interactionNodeSingletonTag">
+         <string notr="true"/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>sequenceBrowser</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_2">
+        <property name="text">
+         <string>Flythrough Frame Number</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="ctkSliderWidget" name="browserFrameForFlythroughSlider">
+        <property name="decimals">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <double>200.000000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>browserFrameForFlythrough</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="label_3">
+        <property name="text">
+         <string>Steps to Show Cycle At</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QLineEdit" name="cycleStepNumbersLineEdit">
+        <property name="toolTip">
+         <string>A comma-separated list of camera location step numbers at which to show the full dynamic cycle, e.g.
+7,11</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>cycleStepsString</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QCheckBox" name="addCameraConeCheckBox">
+        <property name="text">
+         <string>Add Camera Cone</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>addCameraConeFlag</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QCheckBox" name="checkBox_6">
+        <property name="toolTip">
+         <string>If checked, the 4D flythrough video will stop after the last indicated step to show the dynamic cycle
+If unchecked, the flythrough continues to the end of the camera locations curve</string>
+        </property>
+        <property name="text">
+         <string>Stop flythrough at last cycle step</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>stopAfterLastCycleFlag</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0" colspan="2">
+       <widget class="QPushButton" name="record4DPushButton">
+        <property name="text">
+         <string>Record 4D Video</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="label_4">
+        <property name="text">
+         <string>Number of Repetitions</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QSpinBox" name="spinBox_4">
+        <property name="minimum">
+         <number>1</number>
+        </property>
+        <property name="value">
+         <number>2</number>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>repetitionCount</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="ctkCollapsibleButton" name="AdvancedCB">
      <property name="text">
       <string>Advanced</string>
      </property>
      <layout class="QFormLayout" name="formLayout_6">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_7">
+        <property name="text">
+         <string>Camera to control</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="qMRMLNodeComboBox" name="cameraNodeSelector">
+        <property name="toolTip">
+         <string>Select which camera to control (defaults to the current camera for View1 if unselected)</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist notr="true"/>
+        </property>
+        <property name="hideChildNodeTypes">
+         <stringlist notr="true"/>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="interactionNodeSingletonTag">
+         <string notr="true"/>
+        </property>
+        <property name="selectNodeUponCreation">
+         <bool>false</bool>
+        </property>
+        <property name="noneDisplay">
+         <string>Default to camera for View1</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>cameraNode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QCheckBox" name="checkBox_3">
+        <property name="text">
+         <string>Camera View Angle (deg)</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>useCameraViewAngleBool</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="doubleSpinBox_5">
+        <property name="decimals">
+         <number>1</number>
+        </property>
+        <property name="minimum">
+         <double>1.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>360.000000000000000</double>
+        </property>
+        <property name="singleStep">
+         <double>10.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>30.000000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>cameraViewAngleDegrees</string>
+        </property>
+       </widget>
+      </item>
       <item row="2" column="0">
        <widget class="QCheckBox" name="checkBox">
         <property name="text">
@@ -363,6 +563,20 @@
         </item>
        </layout>
       </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="label_16">
+        <property name="text">
+         <string>Playback Step Pause (msec)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QSpinBox" name="spinBox_3">
+        <property name="SlicerParameterName" stdset="0">
+         <string>playbackTimerIntervalMilliseconds</string>
+        </property>
+       </widget>
+      </item>
       <item row="6" column="0">
        <widget class="QLabel" name="label_12">
         <property name="text">
@@ -386,42 +600,10 @@
         </property>
        </widget>
       </item>
-      <item row="1" column="0">
-       <widget class="QCheckBox" name="checkBox_3">
+      <item row="7" column="0">
+       <widget class="QLabel" name="label_17">
         <property name="text">
-         <string>Camera View Angle (deg)</string>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>useCameraViewAngleBool</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1">
-       <widget class="QDoubleSpinBox" name="doubleSpinBox_5">
-        <property name="decimals">
-         <number>1</number>
-        </property>
-        <property name="minimum">
-         <double>1.000000000000000</double>
-        </property>
-        <property name="maximum">
-         <double>360.000000000000000</double>
-        </property>
-        <property name="singleStep">
-         <double>10.000000000000000</double>
-        </property>
-        <property name="value">
-         <double>30.000000000000000</double>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>cameraViewAngleDegrees</string>
-        </property>
-       </widget>
-      </item>
-      <item row="5" column="0">
-       <widget class="QLabel" name="label_16">
-        <property name="text">
-         <string>Playback Step Pause (msec)</string>
+         <string>Video Frame Rate (fps)</string>
         </property>
        </widget>
       </item>
@@ -441,57 +623,64 @@
         </property>
        </widget>
       </item>
-      <item row="7" column="0">
-       <widget class="QLabel" name="label_17">
+      <item row="8" column="0">
+       <widget class="QCheckBox" name="checkBox_5">
         <property name="text">
-         <string>Video Frame Rate (fps)</string>
+         <string>Force layout</string>
         </property>
-       </widget>
-      </item>
-      <item row="0" column="0">
-       <widget class="QLabel" name="label_7">
-        <property name="text">
-         <string>Camera to control</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
-       <widget class="qMRMLNodeComboBox" name="cameraNodeSelector">
-        <property name="toolTip">
-         <string>Select which camera to control (defaults to the current camera for View1 if unselected)</string>
-        </property>
-        <property name="nodeTypes">
-         <stringlist notr="true">
-          <string>vtkMRMLCameraNode</string>
-         </stringlist>
-        </property>
-        <property name="hideChildNodeTypes">
-         <stringlist notr="true"/>
-        </property>
-        <property name="noneEnabled">
+        <property name="checked">
          <bool>true</bool>
         </property>
-        <property name="addEnabled">
-         <bool>false</bool>
-        </property>
-        <property name="interactionNodeSingletonTag">
-         <string notr="true"/>
-        </property>
-        <property name="selectNodeUponCreation">
-         <bool>false</bool>
-        </property>
-        <property name="noneDisplay">
-         <string>Default to camera for View1</string>
-        </property>
-        <property name="SlicerParameterNode" stdset="0">
-         <string>cameraNode</string>
+        <property name="SlicerParameterName" stdset="0">
+         <string>useForceLayoutSelection</string>
         </property>
        </widget>
       </item>
-      <item row="5" column="1">
-       <widget class="QSpinBox" name="spinBox_3">
+      <item row="8" column="1">
+       <widget class="QComboBox" name="comboBox_3">
         <property name="SlicerParameterName" stdset="0">
-         <string>playbackTimerIntervalMilliseconds</string>
+         <string>layoutSelection</string>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="0">
+       <widget class="QCheckBox" name="checkBox_7">
+        <property name="text">
+         <string>Standarize 4D Segment Color</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>useStandardize4DSegmentColor</string>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="1">
+       <widget class="ctkColorPickerButton" name="segmentColorPickerButton">
+        <property name="color">
+         <color>
+          <red>255</red>
+          <green>160</green>
+          <blue>115</blue>
+         </color>
+        </property>
+        <property name="displayColorName">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="10" column="0">
+       <widget class="QLabel" name="label_5">
+        <property name="text">
+         <string>Lighting Mode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="10" column="1">
+       <widget class="QComboBox" name="comboBox_4">
+        <property name="SlicerParameterName" stdset="0">
+         <string>lightingMode</string>
         </property>
        </widget>
       </item>
@@ -519,6 +708,11 @@
    <extends>QWidget</extends>
    <header>ctkCollapsibleButton.h</header>
    <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ctkColorPickerButton</class>
+   <extends>QPushButton</extends>
+   <header>ctkColorPickerButton.h</header>
   </customwidget>
   <customwidget>
    <class>ctkPathLineEdit</class>
@@ -605,6 +799,22 @@
     <hint type="destinationlabel">
      <x>278</x>
      <y>461</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>VirtualEndoscopy</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>sequenceBrowserSelector</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>206</x>
+     <y>459</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>285</x>
+     <y>528</y>
     </hint>
    </hints>
   </connection>

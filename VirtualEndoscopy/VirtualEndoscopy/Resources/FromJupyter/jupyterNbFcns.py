@@ -670,7 +670,23 @@ def setup_lighting():
     # The back light default seems like it works well (KeyToBackRatio=3.5)
     # Turn on ambient shadows (looks a bit better)
     lightLogic.setUseSSAO(1)
-    lightLogic.setSSAOSizeScaleLog(0)
+    # lightLogic.setSSAOSizeScaleLog(0)
+    # setSSAOSizeScaleLog changed name to setAmbientShadowsSizeScale
+    lightLogic.setAmbientShadowsSizeScale(0)
+
+    # Interactively setting these in Slicer, I think there may be better settings
+    # Key intensity 0.8, warmth 0.5, elevation 45, azimuth 10
+    # Head intensity 1.5, warmth 0.5
+    # Fill intensity 1.0, warmth 0.5, elevation -45, azimuth -10
+    # Back intensity 0.01 (off)
+    # Ambient shadows, enabled, size scale 0.1 (0.0 to 0.2 looks OK), I don't see any
+    # effect of opacity threshold.
+    # Note: key intensity is absolute, all other intensities are multipliers to the key
+
+    ### ACTUALLY, a point source light at the camera works better than
+    ### any combination of these directional lights, (and is more accurate to the
+    ### actual situation) so that has now been coded into DynamicMalaciaToolsLogic
+    ### in place of this setup_lighting() function.
 
 
 def run_4D(

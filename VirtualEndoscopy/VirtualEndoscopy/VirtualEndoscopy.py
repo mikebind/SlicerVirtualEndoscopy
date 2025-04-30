@@ -1,11 +1,12 @@
 import logging
 import os
-from typing import Annotated, Optional
+from typing import Annotated, Optional, List
 import pathlib
 import numpy as np
 from numpy.typing import ArrayLike
 import enum
 import time
+import re
 
 import vtk
 import qt
@@ -17,7 +18,7 @@ if (slicer.app.majorVersion, slicer.app.minorVersion) > (5, 3):
     from slicer.i18n import tr as _
     from slicer.i18n import translate
 from slicer.ScriptedLoadableModule import *
-from slicer.util import VTKObservationMixin
+from slicer.util import VTKObservationMixin, warningDisplay
 from slicer.parameterNodeWrapper import parameterNodeWrapper, WithinRange, Choice
 
 from slicer import (
@@ -28,6 +29,9 @@ from slicer import (
     vtkMRMLSliceNode,
     vtkMRMLViewNode,
     vtkMRMLSequenceBrowserNode,
+    qMRMLThreeDView,
+    vtkMRMLModelNode,
+    vtkMRMLLinearTransformNode,
 )
 
 import ScreenCapture
@@ -64,6 +68,40 @@ class VideoRecordingModeEnum(enum.Enum):
             choiceString = "record only 3D view"
         else:
             raise (Exception(f"Unexpected VideoRecordingModeEnum name {self.name}!"))
+        return choiceString
+
+
+class LayoutSelectionEnum(enum.Enum):
+    UNCHANGED = 0
+    DUAL_3D = 15
+    THREE_D_ONLY = 4
+
+    def label(self):
+        if self.name == "UNCHANGED":
+            choiceString = "leave unchanged"
+        elif self.name == "DUAL_3D":
+            choiceString = "dual 3D + slices"
+        elif self.name == "THREE_D_ONLY":
+            choiceString = "3D only"
+        else:
+            raise (Exception(f"Unexpected LayoutSelectionEnum name {self.name}!"))
+        return choiceString
+
+
+class LightingModeEnum(enum.Enum):
+    UNCHANGED = 0
+    POINT_HEADLIGHT = 1
+    DIRECTION_HEADLIGHT = 2
+
+    def label(self):
+        if self.name == "UNCHANGED":
+            choiceString = "leave unchanged"
+        elif self.name == "POINT_HEADLIGHT":
+            choiceString = "Point source (recommended)"
+        elif self.name == "DIRECTION_HEADLIGHT":
+            choiceString = "Direction source"
+        else:
+            raise (Exception(f"Unexpected LightingModeEnum name {self.name}!"))
         return choiceString
 
 
@@ -212,6 +250,20 @@ class VirtualEndoscopyParameterNode:
     currentlyRecordingVideo: bool = False
     jumpSliceViewMode: JumpSliceModeEnum
     numberOfSteps: int = 0
+    deleteImages: bool = True
+    lightingMode: LightingModeEnum
+    useForceLayoutSelection: bool = True
+    layoutSelection: LayoutSelectionEnum
+    coneModel: vtkMRMLModelNode
+    coneTransform: vtkMRMLLinearTransformNode
+    # 4D
+    sequenceBrowser: vtkMRMLSequenceBrowserNode
+    browserFrameForFlythrough: Annotated[float, WithinRange(0, 1000)]
+    addCameraConeFlag: bool = True
+    stopAfterLastCycleFlag: bool = True
+    cycleStepsString: str
+    repetitionCount: int = 2
+    useStandardize4DSegmentColor: bool = True
 
 
 #
@@ -276,9 +328,16 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.preprocessPushButton.connect(
             "clicked(bool)", self.onPreprocessButtonClicked
         )
+        self.ui.record4DPushButton.connect(
+            "clicked(bool)", self.onRecord4DButtonClicked
+        )
         # Slider
         self.ui.stepSliderWidget.connect(
             "valueChanged(double)", self.onStepSliderValueChanged
+        )
+        # Segment color should trigger parameter node modified event
+        self.ui.segmentColorPickerButton.connect(
+            "colorChanged(QColor)", self._onParameterNodeModified
         )
 
         # Make sure parameter node is initialized (needed for module reload)
@@ -300,6 +359,9 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self.ui.preprocessPushButton.disconnect(
             "clicked(bool)", self.onPreprocessButtonClicked
+        )
+        self.ui.record4DPushButton.disconnect(
+            "clicked(bool)", self.onRecord4DButtonClicked
         )
         # Remove all observers of the module widget
         self.removeObservers()
@@ -352,6 +414,9 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Template showed selection of input node if nothing is selected yet here,
         # but we don't need that functionality.  Other initialization code
         # could go here if needed
+        pn = self._parameterNode
+        pn.lightingMode = LightingModeEnum.POINT_HEADLIGHT
+        pn.layoutSelection = LayoutSelectionEnum.DUAL_3D
 
     def setParameterNode(
         self, inputParameterNode: Optional[VirtualEndoscopyParameterNode]
@@ -388,6 +453,8 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         node state.
         """
         pn = self._parameterNode
+
+        # self.updatingParameterNode = True
         # Preprocess button (enabled if an input curve node is selected)
         self.ui.preprocessPushButton.enabled = True if pn.inputCurve else False
         # Enable Play button And Record Button if both locations and focal points curves are selected
@@ -413,8 +480,63 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             pn.numberOfSteps = pn.cameraLocationsCurveNode.GetNumberOfControlPoints()
             self.ui.stepSliderWidget.maximum = pn.numberOfSteps - 1
 
-        #
+        # Set flythrough frame number slider maximum to match sequence browser number of frames
+        if pn.sequenceBrowser:
+            self.ui.browserFrameForFlythroughSlider.enabled = True
+            self.ui.browserFrameForFlythroughSlider.maximum = (
+                pn.sequenceBrowser.GetNumberOfItems() - 1
+            )
+            # Also set the current frame to this value
+            pn.sequenceBrowser.SetSelectedItemNumber(int(pn.browserFrameForFlythrough))
+        else:
+            # No browser selected
+            self.ui.browserFrameForFlythroughSlider.maximum = 10
+            self.ui.browserFrameForFlythroughSlider.enabled = False
+
+        # Set playback timer interval
         self.timer.setInterval(pn.playbackTimerIntervalMilliseconds)
+        # Ensure that cycleStepsString is valid before enabling record 4D video button
+        try:
+            cycleSteps = self.logic.getCycleStepsFromString(pn.cycleStepsString)
+            cycleStepsStringValidFlag = True
+            self.logic.cycleSteps = cycleSteps
+        except CycleStepsStringConversionError:
+            cycleStepsStringValidFlag = False
+        enableRecord4DBool = (
+            cycleStepsStringValidFlag and pn.sequenceBrowser and enableRecordBool
+        )
+        if enableRecord4DBool:
+            self.ui.record4DPushButton.enabled = True
+            self.ui.record4DPushButton.toolTip = "Record 4D video to file"
+        else:
+            self.ui.record4DPushButton.enabled = False
+            tips = ["To enable:"]
+            if not cycleStepsStringValidFlag:
+                tips.append('Enter a valid value for "Steps to Show Cycle At"')
+            if not pn.sequenceBrowser:
+                tips.append("Select a sequence browser")
+            if not enableRecordBool:
+                if (
+                    not pn.cameraLocationsCurveNode
+                    or not pn.cameraLocationsCurveNode.GetNumberOfControlPoints() > 1
+                ):
+                    tips.append(
+                        "Camera locations curve must be specified and must have more than 1 control point"
+                    )
+                if not pn.focalPointsCurveNode:
+                    tips.append("Focal points curve must be specified")
+                if not pn.videoSaveFilePath:
+                    tips.append("Video save path must be specified")
+            tipStr = "\n".join(tips)
+            self.ui.record4DPushButton.toolTip = tipStr
+        # Handle segment color picker color selection (pass on to logic property)
+        segQColor = self.ui.segmentColorPickerButton.color
+        r, g, b = (segQColor.redF(), segQColor.greenF(), segQColor.blueF())
+        self.logic.segmentColor = [r, g, b]
+        # Control cone visiblity
+        if pn.coneModel:
+            pn.coneModel.GetDisplayNode().SetVisibility(pn.addCameraConeFlag)
+        # Keep an eye on whether this is getting called properly (or if it is getting double-called)
         print("modified")
 
     def jumpToNext(self):
@@ -453,7 +575,20 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             cameraViewUpGuideVector=viewUpGuideVector,
             jumpSlicesMode=pn.jumpSliceViewMode,
         )
-        print(f"New step is {stepValue}")
+        if pn.addCameraConeFlag:
+            if not pn.coneModel:
+                pn.coneModel = self.logic.createConeModel()
+                pn.coneTransform = slicer.mrmlScene.AddNewNodeByClass(
+                    "vtkMRMLLinearTransformNode", "ConeTransform"
+                )
+                pn.coneModel.SetAndObserveTransformNodeID(pn.coneTransform.GetID())
+            # Update transform to new camera position
+            if pn.cameraNode is None:
+                cameraNode = self.logic.getDefaultCameraNode()
+            else:
+                cameraNode = pn.cameraNode
+            self.logic.updateConeModelToCameraTranform(cameraNode, pn.coneTransform)
+        # print(f"New step is {stepValue}")
 
     def onPlayPushButtonToggled(self, toggleBool) -> None:
         """Starting from the current step, play through all remaining steps"""
@@ -469,13 +604,20 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def stopPlaying(self):
         self.timer.stop()
         self.ui.playPushButton.text = "Play"
+        self.ui.playPushButton.checked = False
 
     def onRecordPushButtonClicked(self) -> None:
         """Record video of full flythrough"""
         # Gather parameters
         # Capture the video
         self.logic.recordVideo(self._parameterNode)
-        pass
+
+    def onRecord4DButtonClicked(self) -> None:
+        """Record video of full flythrough with dynamic cycling
+        at indicated steps
+        """
+        pn = self._parameterNode
+        self.logic.record4DVideo(pn)
 
     def onPreprocessButtonClicked(self) -> None:
         """
@@ -522,32 +664,6 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Probably un-needed!
         # self._onParameterNodeModified()
 
-    def onApplyButton(self) -> None:
-        """
-        Run processing when user clicks "Apply" button.
-        """
-        with slicer.util.tryWithErrorDisplay(
-            _("Failed to compute results."), waitCursor=True
-        ):
-            # Compute output
-            self.logic.process(
-                self.ui.inputSelector.currentNode(),
-                self.ui.outputSelector.currentNode(),
-                self.ui.imageThresholdSliderWidget.value,
-                self.ui.invertOutputCheckBox.checked,
-            )
-
-            # Compute inverted output (if needed)
-            if self.ui.invertedOutputSelector.currentNode():
-                # If additional output volume is selected then result with inverted threshold is written there
-                self.logic.process(
-                    self.ui.inputSelector.currentNode(),
-                    self.ui.invertedOutputSelector.currentNode(),
-                    self.ui.imageThresholdSliderWidget.value,
-                    not self.ui.invertOutputCheckBox.checked,
-                    showResult=False,
-                )
-
 
 #
 # VirtualEndoscopyLogic
@@ -569,6 +685,13 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         Called when the logic class is instantiated. Can be used for initializing member variables.
         """
         ScriptedLoadableModuleLogic.__init__(self)
+        # There are a few parameters which don't play well with the
+        # parameter node wrapper.  Instead they will be derived and stored
+        # in the logic object.  These will include cycleSteps (a list of
+        # integers derived from a string), and the segment color choice
+        # (chosen using a widget that can't interface with the wrapper).
+        self.cycleSteps = []
+        self.segmentColor = []
 
     def getParameterNode(self):
         return VirtualEndoscopyParameterNode(super().getParameterNode())
@@ -589,13 +712,157 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         # Name failed to match any 3D view
         raise ViewNameNotFoundError(f'View named "{name}" not found!')
 
+    def getQThreeDViewByViewName(self, name="View1") -> qMRMLThreeDView:
+        """Note that this returns something slightly different than
+        getThreeDViewNodeByName().  This one is the one to use when
+        you need to get the renderer for the view.  The other one
+        is when you need the mrmlViewNode (like for screen capture
+        module use).
+        """
+        lm = slicer.app.layoutManager()
+        for viewIdx in range(lm.threeDViewCount):
+            threeDView = lm.threeDWidget(viewIdx).threeDView()
+            viewNode = lm.threeDWidget(viewIdx).mrmlViewNode()
+            if viewNode.GetName() == name:
+                return threeDView
+        # Name failed to match any 3D view
+        raise ViewNameNotFoundError(f'View named "{name}" not found!')
+
+    def getCycleStepsFromString(self, cycleStepsStr: str):
+        """Process string into list of integer step numbers to run the
+        dynamic cycle at. Split on commas, then in each group of characters,
+        strip away non-digit characters from either end, then convert to int.
+        If this conversion fails at any of the split values
+        """
+        cycleSteps = []
+        for cycleStepStr in cycleStepsStr.split(","):
+            # Strip leading and trailing non-digit characters
+            cycleStepStrTrimmed = re.sub(r"^\D+|\D+$", "", cycleStepStr)
+            try:
+                cycleStep = int(cycleStepStrTrimmed)
+            except ValueError:
+                raise CycleStepsStringConversionError(
+                    f"Could not convert '{cycleStepStr} to integer!"
+                )
+            cycleSteps.append(cycleStep)
+        if len(cycleSteps) == 0:
+            raise CycleStepsStringConversionError(
+                "No cycle steps found, at least one must be specified for 4D videos!"
+            )
+        return cycleSteps
+
+    def prepareForRecording(
+        self, parameterNode: VirtualEndoscopyParameterNode, fourDFlag=False
+    ):
+        """Prepare the layout, lighting, etc according to settings."""
+        pn = parameterNode
+        ## Layout
+        if pn.useForceLayoutSelection:
+            if pn.layoutSelection == LayoutSelectionEnum.UNCHANGED:
+                pass
+            else:
+                # LayoutSelectionEnum values are layout numbers and can be used directly
+                layoutNumber = pn.layoutSelection.value
+                slicer.app.layoutManager().setLayout(layoutNumber)
+
+        ## Lighting
+        if pn.lightingMode == LightingModeEnum.POINT_HEADLIGHT:
+            self.setUpDefaultEndoLighting()
+        elif pn.lightingMode == LightingModeEnum.DIRECTION_HEADLIGHT:
+            self.setUpDirectionalHeadlight()
+        elif pn.lightingMode == LightingModeEnum.UNCHANGED:
+            pass
+        else:
+            raise (Exception(f"Unknown lighting mode supplied!"))
+
+        ## 4D Segment Color
+        if fourDFlag and pn.sequenceBrowser and pn.useStandardize4DSegmentColor:
+            browser = pn.sequenceBrowser
+            segOutputs = self.getSegmentationNodesFromBrowser(browser)
+            nSegNodes = len(segOutputs)
+            if nSegNodes == 0:
+                warningDisplay(
+                    "Can't set 4D segment color because there are no segmentation nodes associated with the browser!"
+                )
+            elif nSegNodes > 1:
+                warningDisplay(
+                    "Multiple segmentation nodes are associated with the browser, 4D segment color will be set on ALL of them!"
+                )
+
+            for proxNode, segSeqNode in segOutputs:
+                self.setSeqSegmentColor(browser, proxNode, color=self.segmentColor)
+
+    def setSeqSegmentColor(self, browser, proxNode, color, segmentIdx=0):
+        """Cycle through browser and, in each frame, set the color of the
+        segmentIdx'th segment to the supplied color.  The color should be
+        a list of three rgb values, fractional 0-1.
+        """
+        for idx in range(browser.GetNumberOfItems()):
+            browser.SetSelectedItemNumber(idx)
+            segmentID = proxNode.GetSegmentation().GetNthSegmentID(segmentIdx)
+            proxNode.GetSegmentation().GetSegment(segmentID).SetColor(color)
+
+    def getSegmentationNodesFromBrowser(self, browserNode):
+        """Check all sequence nodes for this browser and return
+        the sequence nodes and their proxy nodes which are segmentation
+        nodes.
+        """
+        segOutputs = []
+        proxyCollection = vtk.vtkCollection()
+        browserNode.GetAllProxyNodes(proxyCollection)
+        for proxIdx in range(proxyCollection.GetNumberOfItems()):
+            proxNode = proxyCollection.GetItemAsObject(proxIdx)
+            if proxNode.IsA("vtkMRMLSegmentationNode"):
+                seqNode = browserNode.GetSequenceNode(proxNode)
+                segOutputs.append((proxNode, seqNode))
+        return segOutputs
+
+    def record4DVideo(
+        self,
+        parameterNode: VirtualEndoscopyParameterNode,
+        ffmpegExtraOptions: str = "-codec libx264 -vf scale=-2:{videoHeight} -pix_fmt yuv420p",
+    ):
+        """Record a flythrough video like recordVideo, but pause at the
+        steps listed in cycleSteps, and cycle through the dynamic frames, then
+        continue through the flythrough.  Or, if it was the last cycleStep,
+        and the stop after last cycle step checkbox was checked, then end
+        the video there.
+        """
+        self.prepareForRecording(parameterNode, fourDFlag=True)
+
+        captureLogic = ScreenCapture.ScreenCaptureLogic()
+
+        imgFilePaths, imagePattern = self.save4DImageSeriesByParameterNode(
+            parameterNode=parameterNode, cycleSteps=self.cycleSteps
+        )
+        frameRate = parameterNode.videoFrameRateFPS
+        videoHeight = parameterNode.videoHeightPixels
+
+        # Save a series
+        extraOptions = ffmpegExtraOptions.format(videoHeight=videoHeight)
+        # Use ScreenCapture module logic to capture a video from the series of images
+        videoFileName = parameterNode.videoSaveFilePath
+        imageDirectory = imgFilePaths[0].parent
+        captureLogic.createVideo(
+            frameRate, extraOptions, imageDirectory, imagePattern, videoFileName
+        )
+        # Note that createVideo() automatically specifies -y, -r {frameRate}, -start_number 0
+        # If -pix_fmt yuv420p is omitted, many players will not work (incl windows media player)
+        # If the scaling is omitted, I get weird artifacts.  One theory is that this is due to bit rate limitations on huge
+        # images/videos.
+        # Clean up images as requested
+        if parameterNode.deleteImages:
+            for imgFile in imgFilePaths:
+                imgFile.unlink()
+
     def recordVideo(
         self,
         parameterNode: VirtualEndoscopyParameterNode,
-        deleteImages: bool = True,
         ffmpegExtraOptions: str = "-codec libx264 -vf scale=-2:{videoHeight} -pix_fmt yuv420p",
     ):
         """Save flythrough as a series of images and then compile into a video"""
+        self.prepareForRecording(parameterNode, fourDFlag=False)
+
         captureLogic = ScreenCapture.ScreenCaptureLogic()
 
         imgFilePaths, imagePattern = self.saveImageSeriesByParameterNode(
@@ -617,9 +884,88 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         # If the scaling is omitted, I get weird artifacts.  One theory is that this is due to bit rate limitations on huge
         # images/videos.
         # Clean up images as requested
-        if deleteImages:
+        if parameterNode.deleteImages:
             for imgFile in imgFilePaths:
                 imgFile.unlink()
+
+    def save4DImageSeriesByParameterNode(
+        self,
+        parameterNode: VirtualEndoscopyParameterNode,
+        cycleSteps: List[int] = None,
+        imageDirectory: Optional[pathlib.Path] = None,
+        imageFilePattern: str = "tempImage_%05d.png",
+    ) -> tuple[list[pathlib.Path], str]:
+        """Save image series using parameters from parameter node.
+        Return list of saved image file names and the image file pattern used.
+        This 4D version adds the capability to show temporal loop repetitions.
+        """
+        pn = parameterNode
+        captureLogic = ScreenCapture.ScreenCaptureLogic()
+        # Determine view to capture (3D only or all views)
+        if pn.videoRecordingMode == VideoRecordingModeEnum.THREE_D_ONLY:
+            viewToCapture = self.getThreeDViewNodeByName()
+        elif pn.videoRecordingMode == VideoRecordingModeEnum.ALL_VIEWS:
+            viewToCapture = None  # ScreenCapture treats this as 'capture all views'
+        else:
+            raise ValueError(
+                f"Unknown video recording mode {pn.videoRecordingMode} supplied!"
+            )
+        # Determine Image Directory
+        if imageDirectory is None:
+            # Create a temporary subdirectory of video directory
+            vidSaveFilePath = pn.videoSaveFilePath
+            vidSaveDirectory = vidSaveFilePath.parent
+            imageDirectory = pathlib.Path.joinpath(vidSaveDirectory, "TempImageDir")
+        # Ensure image directory exists for saving
+        imageDirectory.mkdir(parents=True, exist_ok=True)
+
+        imageFilePaths = []
+        imageNumber = 0  # counter
+        # Build sequence of frame numbers for cycles
+        browser = pn.sequenceBrowser
+        startFrameIdx = int(pn.browserFrameForFlythrough)
+        nFrames = browser.GetNumberOfItems()
+        fullTimePointList = list(range(nFrames))
+        # Start with continuing from the start frame to the end
+        timePointIdxList = list(range(startFrameIdx + 1, nFrames))
+        # Add full loops (-1 because 1 loop is built in already)
+        for idx in range(pn.repetitionCount - 1):
+            timePointIdxList.extend(fullTimePointList)
+        # Finish with returning to the start frame
+        timePointIdxList.extend(list(range(startFrameIdx + 1)))
+        ### Loop and gather flythrough and time loop images
+        for stepNumber in range(pn.numberOfSteps):
+            pn.currentStepIndex = stepNumber
+            self.jumpCameraByParameterNode(parameterNode=pn)
+            imageFileName = imageFilePattern % (imageNumber)
+            imageFilePath = pathlib.Path(imageDirectory, imageFileName)
+            captureLogic.captureImageFromView(
+                view=viewToCapture, filename=imageFilePath
+            )
+            imageFilePaths.append(imageFilePath)
+            # increment image number
+            imageNumber += 1
+            if stepNumber in cycleSteps:
+                # Add dynamic cycle images here
+                for frameIdx in timePointIdxList:
+                    browser.SetSelectedItemNumber(frameIdx)
+                    # slicer.app.processEvents()  # otherwise plots don't always update in time
+                    # NOTE: even with processEvents() plots don't update in time, they only
+                    # update every other frame, which is a bit confusing. Not critical at the
+                    # moment, but should return here if it is ever critical.
+                    # The problem shows up at the image capture level, before ffmpeg is involved
+                    imageFileName = imageFilePattern % (imageNumber)
+                    imageFilePath = pathlib.Path(imageDirectory, imageFileName)
+                    captureLogic.captureImageFromView(
+                        view=viewToCapture, filename=imageFilePath
+                    )
+                    imageFilePaths.append(imageFilePath)
+                    # increment image number
+                    imageNumber += 1
+                # Stop the flythrough early if requested and it's time
+                if pn.stopAfterLastCycleFlag and stepNumber == cycleSteps[-1]:
+                    break
+        return imageFilePaths, imageFilePattern
 
     def saveImageSeriesByParameterNode(
         self,
@@ -876,6 +1222,21 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
             pn.jumpSliceViewMode,
         )
 
+    def getDefaultCameraNode(self):
+        """Get camera node associated with View1 as the default"""
+        # Default to the current camera for the first 3D view ('View1')
+        layoutManager = slicer.app.layoutManager()
+        for threeDViewIndex in range(layoutManager.threeDViewCount):
+            view = layoutManager.threeDWidget(threeDViewIndex).threeDView()
+            threeDViewNode = view.mrmlViewNode()
+            viewName = threeDViewNode.GetName()
+            if viewName == "View1":
+                cameraNode = slicer.modules.cameras.logic().GetViewActiveCameraNode(
+                    threeDViewNode
+                )
+                return cameraNode
+        raise (Exception("Default camera node not found!"))
+
     def jumpCamera(
         self,
         location: ArrayLike,
@@ -904,16 +1265,7 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         """
         # Default camera node to the camera for View1
         if cameraNode is None:
-            # Default to the current camera for the first 3D view ('View1')
-            layoutManager = slicer.app.layoutManager()
-            for threeDViewIndex in range(layoutManager.threeDViewCount):
-                view = layoutManager.threeDWidget(threeDViewIndex).threeDView()
-                threeDViewNode = view.mrmlViewNode()
-                viewName = threeDViewNode.GetName()
-                if viewName == "View1":
-                    cameraNode = slicer.modules.cameras.logic().GetViewActiveCameraNode(
-                        threeDViewNode
-                    )
+            cameraNode = self.getDefaultCameraNode()
         # Set camera view angle if requested
         if cameraViewAngleDeg is not None:
             cameraNode.GetCamera().SetViewAngle(cameraViewAngleDeg)
@@ -947,6 +1299,9 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         segmentName="SimpleAirwayAir",
         segmentColor=None,
     ):
+        """This function can be called to standardize the color of the airway
+        segment, the layout (dual 3D), and lighting (point source light at camera)
+        """
         if segmentColor:
             jupyterNbFcns.set_sequence_segment_color(
                 sequenceBrowserNode,
@@ -955,6 +1310,7 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
                 color=segmentColor,
             )
         else:
+            # don't overwrite default color listed in function definition...
             jupyterNbFcns.set_sequence_segment_color(
                 sequenceBrowserNode, segmentationProxyNode, segmentName
             )
@@ -962,16 +1318,120 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         Dual3DLayoutID = 15
         slicer.app.layoutManager().setLayout(Dual3DLayoutID)
         # Set better lighting for endoscopy view
-        jupyterNbFcns.setup_lighting()
+        self.setUpDefaultEndoLighting()
+        # jupyterNbFcns.setup_lighting()
 
-    """ IDEA for TODO: Instead of doing a full flythrough of the VirtualEndoscopy
-    path, and THEN doing dynamic looping, some additional flexibility could be cool.
-    Allow specification of a list of frame numbers to stop at and run the 
-    dynamic loop(s). This could be helpful if there are possibly multiple
-    points of interest. Also, if we could specify the last flythrough index
-    we could skip the need to chop off the continuation of the centerline.
-    This shouldn't be too hard to implement. 
-    """
+    def setUpDefaultEndoLighting(self, intensity=1.2, coneAngle=90, viewName="View1"):
+        """Set up the default endoscopy lighting.  This is a point source light
+        located at the camera.
+        The default directional headlight is generally too dark on the sides, and
+        the set of directional lights in a lightKit also doesn't work well (shadows
+        in weird places). Both problems are because the general tube shape of
+        lumens have surfaces mostly perpendicular to the directional light
+        direction(s), and therefore end up poorly lit.
+        We could experiment if offsetting the light from the exact camera center
+        enhances things, but it could also potentially cause issues (e.g. if the
+        light ended up outside the lumen while the camera was inside but near the
+        edge). Having it at the camera center at least ensures the scene is
+        illuminated.
+        """
+        threeDView = self.getQThreeDViewByViewName(viewName)
+        renderWindow = threeDView.renderWindow()
+        renderer = renderWindow.GetRenderers().GetFirstRenderer()
+        # Remove existing lights
+        lights = renderer.GetLights()
+        lights.InitTraversal()
+        light = lights.GetNextItem()
+        while light:
+            renderer.RemoveLight(light)
+            light = lights.GetNextItem()
+        # Create new point source light
+        light = vtk.vtkLight()
+        light.SetLightTypeToCameraLight()  # Attach the light to the camera
+        light.SetPositional(True)  # Make the light a point source
+        light.SetConeAngle(90)
+        light.SetIntensity(1.5)
+        # Could also control light color here
+        # Could also control ambient, diffuse, specular light colors
+
+        # Add to renderer and re-render
+        renderer.AddLight(light)
+        renderWindow.Render()
+
+    def updateConeModelToCameraTranform(self, cameraNode, transformNode):
+        """ """
+
+        # Get camera position and focal point
+        camera_position = np.array(cameraNode.GetPosition())
+        focal_point = np.array(cameraNode.GetFocalPoint())
+
+        # Compute the camera direction vector
+        direction = focal_point - camera_position
+        direction /= np.linalg.norm(direction)
+
+        # Define the default up vector (positive Z-axis)
+        camUp = np.array([0, 0, 1])
+
+        # Check if the direction is close to the positive Z-axis
+        if np.abs(np.dot(direction, camUp)) > 0.9:
+            # Switch to a different up vector (positive Y-axis)
+            camUp = np.array([0, 1, 0])
+
+        # Compute the binormal vector using cross product
+        camRight = np.cross(camUp, direction)
+        camRight /= np.linalg.norm(camRight)
+
+        # Recompute the up vector to ensure orthogonality
+        camUp = np.cross(direction, camRight)
+
+        # Create the transformation matrix
+        transformMatrix = np.eye(4)
+        transformMatrix[:3, 0] = direction
+        transformMatrix[:3, 1] = camUp
+        transformMatrix[:3, 2] = camRight
+        transformMatrix[:3, 3] = camera_position
+        # Update transform node from matrix
+        slicer.util.updateTransformMatrixFromArray(transformNode, transformMatrix)
+
+    def createConeModel(
+        self,
+        height=10,
+        radius=10,
+        resolution=50,
+        capping=0,
+        color=(0.54, 0.54, 0.54),
+        opacity=0.5,
+    ):
+        """
+        This function creates a cone which has its tip at the origin and opens in the
+        positive R direction.
+        VTK default Cones are created with direction opening to the left (-R) and
+        with center (halfway along the height of the cone) at the origin. That puts the
+        point of the cone at (H/2,0,0), so this funciton reflects and translates to
+        satisfy having the tip at the origin and opening towards the right.
+        """
+
+        cone = vtk.vtkConeSource()
+        cone.SetCenter(height / 2, 0, 0)
+        cone.SetDirection(-1, 0, 0)  # Opens towards the positive R axis
+        cone.SetHeight(height)
+        cone.SetRadius(radius)
+        cone.SetResolution(resolution)
+        cone.SetCapping(capping)
+        cone.Update()
+
+        coneModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "Cone")
+        coneModel.SetAndObservePolyData(cone.GetOutput())
+        coneModel.CreateDefaultDisplayNodes()
+        # Display properties
+        dn = coneModel.GetDisplayNode()
+        dn.SetColor(*color)
+        dn.SetOpacity(opacity)
+        dn.SetBackfaceCulling(0)
+        dn.SetViewNodeIDs(
+            ["vtkMRMLViewNode2"]
+        )  # only visible in View2 (so it doesn't obscure the View1 camera)
+        return coneModel
 
     def createDynamicVirtualEndoVid(
         self,
@@ -1028,121 +1488,10 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
             # Also remove the temporary directory
             imgSaveDir.unlink()
 
-    def process(
-        self,
-        inputVolume: vtkMRMLScalarVolumeNode,
-        outputVolume: vtkMRMLScalarVolumeNode,
-        imageThreshold: float,
-        invert: bool = False,
-        showResult: bool = True,
-    ) -> None:
-        """
-        Run the processing algorithm.
-        Can be used without GUI widget.
-        :param inputVolume: volume to be thresholded
-        :param outputVolume: thresholding result
-        :param imageThreshold: values above/below this threshold will be set to 0
-        :param invert: if True then values above the threshold will be set to 0, otherwise values below are set to 0
-        :param showResult: show output volume in slice viewers
-        """
-
-        if not inputVolume or not outputVolume:
-            raise ValueError("Input or output volume is invalid")
-
-        import time
-
-        startTime = time.time()
-        logging.info("Processing started")
-
-        # Compute the thresholded output volume using the "Threshold Scalar Volume" CLI module
-        cliParams = {
-            "InputVolume": inputVolume.GetID(),
-            "OutputVolume": outputVolume.GetID(),
-            "ThresholdValue": imageThreshold,
-            "ThresholdType": "Above" if invert else "Below",
-        }
-        cliNode = slicer.cli.run(
-            slicer.modules.thresholdscalarvolume,
-            None,
-            cliParams,
-            wait_for_completion=True,
-            update_display=showResult,
-        )
-        # We don't need the CLI module node anymore, remove it to not clutter the scene with it
-        slicer.mrmlScene.RemoveNode(cliNode)
-
-        stopTime = time.time()
-        logging.info(f"Processing completed in {stopTime-startTime:.2f} seconds")
-
-
-#
-# VirtualEndoscopyTest
-#
-
-
-class VirtualEndoscopyTest(ScriptedLoadableModuleTest):
-    """
-    This is the test case for your scripted module.
-    Uses ScriptedLoadableModuleTest base class, available at:
-    https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
-    """
-
-    def setUp(self):
-        """Do whatever is needed to reset the state - typically a scene clear will be enough."""
-        slicer.mrmlScene.Clear()
-
-    def runTest(self):
-        """Run as few or as many tests as needed here."""
-        self.setUp()
-        self.test_VirtualEndoscopy1()
-
-    def test_VirtualEndoscopy1(self):
-        """Ideally you should have several levels of tests.  At the lowest level
-        tests should exercise the functionality of the logic with different inputs
-        (both valid and invalid).  At higher levels your tests should emulate the
-        way the user would interact with your code and confirm that it still works
-        the way you intended.
-        One of the most important features of the tests is that it should alert other
-        developers when their changes will have an impact on the behavior of your
-        module.  For example, if a developer removes a feature that you depend on,
-        your test should break so they know that the feature is needed.
-        """
-
-        self.delayDisplay("Starting the test")
-
-        # Get/create input data
-
-        import SampleData
-
-        registerSampleData()
-        inputVolume = SampleData.downloadSample("VirtualEndoscopy1")
-        self.delayDisplay("Loaded test data set")
-
-        inputScalarRange = inputVolume.GetImageData().GetScalarRange()
-        self.assertEqual(inputScalarRange[0], 0)
-        self.assertEqual(inputScalarRange[1], 695)
-
-        outputVolume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
-        threshold = 100
-
-        # Test the module logic
-
-        logic = VirtualEndoscopyLogic()
-
-        # Test algorithm with non-inverted threshold
-        logic.process(inputVolume, outputVolume, threshold, True)
-        outputScalarRange = outputVolume.GetImageData().GetScalarRange()
-        self.assertEqual(outputScalarRange[0], inputScalarRange[0])
-        self.assertEqual(outputScalarRange[1], threshold)
-
-        # Test algorithm with inverted threshold
-        logic.process(inputVolume, outputVolume, threshold, False)
-        outputScalarRange = outputVolume.GetImageData().GetScalarRange()
-        self.assertEqual(outputScalarRange[0], inputScalarRange[0])
-        self.assertEqual(outputScalarRange[1], inputScalarRange[1])
-
-        self.delayDisplay("Test passed")
-
 
 class ViewNameNotFoundError(Exception):
+    pass
+
+
+class CycleStepsStringConversionError(Exception):
     pass
