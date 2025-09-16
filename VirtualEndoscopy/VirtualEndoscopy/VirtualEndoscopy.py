@@ -19,6 +19,10 @@ if (slicer.app.majorVersion, slicer.app.minorVersion) > (5, 3):
     from slicer.i18n import translate
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin, warningDisplay
+from slicer.util import (
+    arrayFromMarkupsControlPoints,
+    updateMarkupsControlPointsFromArray,
+)
 from slicer.parameterNodeWrapper import parameterNodeWrapper, WithinRange, Choice
 
 from slicer import (
@@ -218,6 +222,9 @@ class VirtualEndoscopyParameterNode:
     """
 
     inputCurve: vtkMRMLMarkupsCurveNode
+    useSmoothingBool: bool = True
+    smoothingWindow: int = 11
+    smoothingOrder: int = 1
     resampleSpacingMm: float = 0.5
     useResampleSpacingBool: bool = True
     lookAheadIntervalPoints: int = 5
@@ -625,6 +632,9 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """
         # Gather inputs
         inputCurveNode = self._parameterNode.inputCurve
+        useSmoothing = self._parameterNode.useSmoothingBool
+        smoothingWindow = self._parameterNode.smoothingWindow
+        smoothingOrder = self._parameterNode.smoothingOrder
         useResampleSpacing = self._parameterNode.useResampleSpacingBool
         resampleSpacingMm = self._parameterNode.resampleSpacingMm
         lookAheadInterval = self._parameterNode.lookAheadIntervalPoints
@@ -652,6 +662,9 @@ class VirtualEndoscopyWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Process
         self.logic.processInputCurveToLocationsAndFocalPoints(
             inputCurveNode,
+            useSmoothing,
+            smoothingWindow,
+            smoothingOrder,
             useResampleSpacing,
             resampleSpacingMm,
             lookAheadInterval,
@@ -854,6 +867,10 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         if parameterNode.deleteImages:
             for imgFile in imgFilePaths:
                 imgFile.unlink()
+            try:
+                imageDirectory.rmdir()
+            except:
+                pass
 
     def recordVideo(
         self,
@@ -1025,6 +1042,9 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
     def processInputCurveToLocationsAndFocalPoints(
         self,
         inputCurveNode: vtkMRMLMarkupsNode,
+        useSmoothing: bool,
+        smoothingWindow: int,
+        smoothingOrder: int,
         useResampleSpacing: bool,
         resampleSpacingMm: float,
         lookAheadInterval: int,
@@ -1053,6 +1073,15 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         # Resample if requested
         if useResampleSpacing:
             self.resampleCurveNode(inputCurveNode, resampleSpacingMm, cameraLocations)
+        # Smooth if requested
+        if useSmoothing:
+            self.smoothCurveNode(cameraLocations, smoothingWindow, smoothingOrder)
+            if useResampleSpacing:
+                # Resample again to ensure uniform spacing after smoothing
+                self.resampleCurveNode(
+                    cameraLocations, resampleSpacingMm, cameraLocations
+                )
+
         # Derive camera focal point locations
         self.createOrUpdateFocalPointNode(
             cameraLocations, lookAheadInterval, finalFocalPoint, cameraFocalPoints
@@ -1126,6 +1155,22 @@ class VirtualEndoscopyLogic(ScriptedLoadableModuleLogic):
         # Fill the remainder of the focal point locations with this final point
         focalPoints[-focusDelta:, :] = np.repeat(finalFocus, focusDelta, axis=0)
         return focalPoints
+
+    def smoothCurveNode(
+        self,
+        curvePointsNode: vtkMRMLMarkupsNode,
+        smoothingWindow: int = 11,
+        smoothingOrder: int = 1,
+    ):
+        """
+        Smooths the input curve's control points using a Savitzky-Golay filter
+        """
+        smooth_curve_savgol(
+            curve_node=curvePointsNode,
+            window_length=smoothingWindow,
+            polyorder=smoothingOrder,
+            create_new_node=False,
+        )
 
     def resampleCurveNode(
         self,
@@ -1495,3 +1540,72 @@ class ViewNameNotFoundError(Exception):
 
 class CycleStepsStringConversionError(Exception):
     pass
+
+
+# MARK: Helper functions
+# Curve smoothing function using Savitzky-Golay filter
+from scipy.signal import savgol_filter
+
+
+def smooth_curve_savgol(
+    curve_node, window_length=11, polyorder=1, create_new_node=False
+):
+    """
+    Smooths the control points of a vtkMRMLMarkupsCurveNode using a
+    Savitzky-Golay filter.
+
+    Args:
+        curve_node (vtkMRMLMarkupsCurveNode): The curve node to be smoothed.
+        window_length (int): The length of the filter window (i.e., the number of
+                             coefficients). window_length must be a positive odd integer.
+        polyorder (int): The order of the polynomial used to fit the samples.
+                         polyorder must be less than window_length.
+        create_new_node (bool): If True, a new curve node is created and returned
+                                with the smoothed control points. If False, the
+                                input curve_node is modified in place.
+
+    Returns:
+        vtkMRMLMarkupsCurveNode: The smoothed curve node. This will be a new
+                                 node if create_new_node is True, otherwise it
+                                 will be the input node.
+    """
+    # Check for valid window_length and polyorder
+    if window_length % 2 == 0 or window_length <= 0:
+        raise ValueError("window_length must be a positive odd integer.")
+    if polyorder >= window_length:
+        raise ValueError("polyorder must be less than window_length.")
+
+    # Get the control points as a vtkPoints object
+    point_array = arrayFromMarkupsControlPoints(curve_node)
+    num_points = point_array.shape[0]
+
+    if num_points < window_length:
+        print(
+            f"Warning: Not enough points ({num_points}) for the specified window length ({window_length}). No smoothing applied."
+        )
+        # Return the original node without modification
+        if create_new_node:
+            new_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode")
+            new_node.Copy(curve_node)
+            return new_node
+        else:
+            return curve_node
+
+    # Apply the Savitzky-Golay filter to each coordinate column
+    smoothed_array = savgol_filter(
+        point_array, window_length, polyorder, axis=0, mode="nearest"
+    )
+    # Create or update the curve node with the smoothed points
+    if create_new_node:
+        # Create a new curve node and set the smoothed points
+        smoothed_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode")
+        smoothed_node.SetName(f"{curve_node.GetName()}_smoothed")
+        # Copy other properties from the original node
+        smoothed_node.SetAttribute("Slicer_Smoothing_Source", curve_node.GetID())
+        # Set control points
+        updateMarkupsControlPointsFromArray(smoothed_node, smoothed_array)
+        return smoothed_node
+    else:
+        # Update the existing curve node's points
+        updateMarkupsControlPointsFromArray(curve_node, smoothed_array)
+        return curve_node
